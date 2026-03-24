@@ -154,7 +154,7 @@ export default function CareerCompanyFinder() {
     }, 3000);
 
     try {
-      const res = await fetch("/api/v1/messages", {
+      const res = await fetch("/api/chat", {
         method: "POST",
         headers: {
           "Content-Type": "application/json", "x-api-key": import.meta.env.VITE_ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "anthropic-dangerous-allow-browser": "true",
