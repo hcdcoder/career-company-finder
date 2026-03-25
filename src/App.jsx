@@ -187,6 +187,13 @@ export default function CareerCompanyFinder() {
       const data = await res.json();
       clearInterval(interval);
 
+      if (!res.ok) {
+        if (res.status === 429) {
+          throw new Error("rate_limit");
+        }
+        throw new Error(data.error?.message || "API request failed.");
+      }
+
       const textBlocks = data.content?.filter((b) => b.type === "text") || [];
       const lastText = textBlocks[textBlocks.length - 1]?.text;
 
@@ -198,7 +205,11 @@ export default function CareerCompanyFinder() {
       setResults(JSON.parse(jsonMatch[0]));
     } catch (err) {
       clearInterval(interval);
-      setError("Something went wrong. Please try again.");
+      if (err.message === "rate_limit") {
+        setError("We're getting too many requests right now — please wait a minute and try again.");
+      } else {
+        setError("Something went wrong. Please try again.");
+      }
       console.error(err);
     } finally {
       setLoading(false);
