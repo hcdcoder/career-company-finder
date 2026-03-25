@@ -187,13 +187,15 @@ export default function CareerCompanyFinder() {
       const data = await res.json();
       clearInterval(interval);
 
-      const text = data.content
-        ?.filter((b) => b.type === "text")
-        .map((b) => b.text)
-        .join("");
+      const textBlocks = data.content?.filter((b) => b.type === "text") || [];
+      const lastText = textBlocks[textBlocks.length - 1]?.text;
 
-      if (!text) throw new Error("No response received.");
-      setResults(JSON.parse(text.replace(/```json|```/g, "").trim()));
+      if (!lastText) throw new Error("No response received.");
+
+      const cleaned = lastText.replace(/```json|```/g, "").trim();
+      const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) throw new Error("Could not find JSON in response.");
+      setResults(JSON.parse(jsonMatch[0]));
     } catch (err) {
       clearInterval(interval);
       setError("Something went wrong. Please try again.");
