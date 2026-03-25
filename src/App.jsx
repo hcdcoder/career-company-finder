@@ -1,11 +1,4 @@
-import { useState, useRef } from "react";
-
-// ─── EMAILJS CONFIG ────────────────────────────────────────────────────────────
-const EMAILJS_SERVICE_ID  = "YOUR_SERVICE_ID";
-const EMAILJS_TEMPLATE_ID = "YOUR_TEMPLATE_ID";
-const EMAILJS_PUBLIC_KEY  = "YOUR_PUBLIC_KEY";
-const NOTIFY_EMAIL        = "hello@hercareerdoctor.com";
-// ──────────────────────────────────────────────────────────────────────────────
+import { useState } from "react";
 
 const C = {
   headerBg: "#6E3611",
@@ -46,213 +39,207 @@ const LEVELS = [
   "Any Level",
 ];
 
-const SYSTEM_PROMPT = `You are a job search strategist inside a career coaching program called Find Your Fulfilling Career (FYFC), created by Dr. Tega Edwin (Her Career Doctor).
+function buildSystemPrompt(jobTitle, industry, level) {
+  return `You are a job search strategist inside a career coaching program called Find Your Fulfilling Career (FYFC), created by Dr. Tega Edwin (Her Career Doctor).
 
-Your job is to find 10 real companies that are actively hiring on their own career pages — NOT from job boards like Indeed, LinkedIn, or Glassdoor — for roles that match the client's résumé and target industry.
+Your job is to find 10 real companies that are actively hiring on their own career pages — NOT from job boards like Indeed, LinkedIn, or Glassdoor — for roles matching the job title "${jobTitle}" (or equivalent/synonym titles) in the ${industry} industry at the ${level} seniority level.
 
 INSTRUCTIONS:
-1. Read the résumé carefully. Extract the top 5 transferable skills and 2-3 relevant job titles this person is qualified for.
-2. Use web search to find companies in the specified industry that have active openings on their company career pages matching this person's background.
+1. First, identify 3-6 synonym or equivalent job titles for "${jobTitle}" in the ${industry} industry. Think about what different companies might call this same type of role.
+2. Use web search to find companies in the ${industry} industry that have active openings on their company career pages matching "${jobTitle}" or any of the synonym titles you identified.
 3. Focus on companies that post jobs on their own careers site (e.g. company.com/careers), not aggregators.
 4. Return EXACTLY 10 companies.
 
 RESPOND ONLY WITH A VALID JSON OBJECT — no preamble, no markdown, no backticks. Follow this exact structure:
 {
-  "skills": ["skill1","skill2","skill3","skill4","skill5"],
-  "titles": ["title1","title2","title3"],
+  "synonymTitles": ["synonym1", "synonym2", "synonym3"],
   "companies": [
     {
       "name": "Company Name",
       "careersUrl": "https://company.com/careers",
-      "roles": ["Role Title 1","Role Title 2"],
-      "whyItFits": "One sentence explaining why this company is a strong match for this person's background.",
+      "roles": ["Role Title 1", "Role Title 2"],
+      "whyItFits": "One sentence explaining why this company is a strong match.",
       "hiringSignal": "Brief note on what signals they are actively hiring."
     }
   ]
 }`;
-
-async function sendEmailNotification(customIndustry, level) {
-  if (
-    EMAILJS_SERVICE_ID  === "YOUR_SERVICE_ID"  ||
-    EMAILJS_TEMPLATE_ID === "YOUR_TEMPLATE_ID" ||
-    EMAILJS_PUBLIC_KEY  === "YOUR_PUBLIC_KEY"
-  ) {
-    console.log("EmailJS not configured yet — skipping notification.");
-    return;
-  }
-  try {
-    const { send } = await import("https://cdn.jsdelivr.net/npm/@emailjs/browser@4/+esm");
-    await send(
-      EMAILJS_SERVICE_ID,
-      EMAILJS_TEMPLATE_ID,
-      {
-        to_email:        NOTIFY_EMAIL,
-        custom_industry: customIndustry,
-        level:           level,
-        timestamp:       new Date().toLocaleString("en-US", {
-          month: "long", day: "numeric", year: "numeric",
-          hour: "numeric", minute: "2-digit", timeZoneName: "short",
-        }),
-      },
-      EMAILJS_PUBLIC_KEY
-    );
-  } catch (err) {
-    console.error("EmailJS notification failed:", err);
-  }
 }
 
 export default function CareerCompanyFinder() {
-  const [resume,        setResume]        = useState(null);
-  const [resumeName,    setResumeName]    = useState("");
-  const [industry,      setIndustry]      = useState("");
-  const [otherIndustry, setOtherIndustry] = useState("");
-  const [level,         setLevel]         = useState("");
-  const [loading,       setLoading]       = useState(false);
-  const [results,       setResults]       = useState(null);
-  const [error,         setError]         = useState("");
-  const [loadingMsg,    setLoadingMsg]    = useState("");
-  const fileRef = useRef();
+  const [jobTitle,    setJobTitle]    = useState("");
+  const [industries,  setIndustries]  = useState([{ value: "", other: "" }]);
+  const [level,       setLevel]       = useState("");
+  const [loading,     setLoading]     = useState(false);
+  const [results,     setResults]     = useState(null);
+  const [error,       setError]       = useState("");
+  const [loadingMsg,  setLoadingMsg]  = useState("");
+  const [progress,    setProgress]    = useState({ current: 0, total: 0, industry: "" });
 
   const loadingMessages = [
-    "Reading your résumé...",
-    "Extracting your transferable skills...",
+    "Identifying synonym job titles...",
     "Searching career pages in your target industry...",
     "Filtering for active hiring signals...",
-    "Matching roles to your background...",
+    "Matching roles to your job title...",
     "Almost there — building your company list...",
   ];
 
-  const handleFile = (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    setResumeName(file.name);
-    const reader = new FileReader();
-    reader.onload = () => setResume({ data: reader.result.split(",")[1], type: file.type });
-    reader.readAsDataURL(file);
+  const addIndustry = () => {
+    if (industries.length < 3) {
+      setIndustries([...industries, { value: "", other: "" }]);
+    }
   };
 
-  const effectiveIndustry = industry === "Other" ? otherIndustry.trim() : industry;
+  const removeIndustry = (idx) => {
+    setIndustries(industries.filter((_, i) => i !== idx));
+  };
+
+  const updateIndustry = (idx, field, val) => {
+    const updated = [...industries];
+    updated[idx] = { ...updated[idx], [field]: val };
+    if (field === "value") updated[idx].other = "";
+    setIndustries(updated);
+  };
+
+  const getEffectiveIndustries = () =>
+    industries
+      .map((ind) => (ind.value === "Other" ? ind.other.trim() : ind.value))
+      .filter(Boolean);
+
+  const canSearch = () => {
+    return jobTitle.trim() && getEffectiveIndustries().length > 0 && level;
+  };
 
   const handleSearch = async () => {
-    if (!resume || !effectiveIndustry || !level) {
-      setError("Please upload your résumé, select an industry, and choose a level.");
+    const effectiveIndustries = getEffectiveIndustries();
+    if (!jobTitle.trim() || effectiveIndustries.length === 0 || !level) {
+      setError("Please enter a job title, select at least one industry, and choose a level.");
       return;
     }
     setError("");
     setResults(null);
     setLoading(true);
 
-    if (industry === "Other" && otherIndustry.trim()) {
-      sendEmailNotification(otherIndustry.trim(), level);
-    }
+    const allResults = [];
+    const allSynonyms = new Set();
+    let hasError = false;
 
-    let idx = 0;
-    setLoadingMsg(loadingMessages[0]);
-    const interval = setInterval(() => {
-      idx = (idx + 1) % loadingMessages.length;
-      setLoadingMsg(loadingMessages[idx]);
-    }, 3000);
+    setProgress({ current: 0, total: effectiveIndustries.length, industry: "" });
 
-    try {
-      const res = await fetch("/api/chat", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          model: "claude-sonnet-4-20250514",
-          max_tokens: 4000,
-          system: SYSTEM_PROMPT,
-          tools: [{ type: "web_search_20250305", name: "web_search" }],
-          messages: [{
-            role: "user",
-            content: [
-              {
-                type: "document",
-                source: {
-                  type: "base64",
-                  media_type: resume.type || "application/pdf",
-                  data: resume.data,
-                },
-              },
-              {
-                type: "text",
-                text: `Target industry: ${effectiveIndustry}\nSeniority level: ${level}\n\nFind 10 companies actively hiring on their career pages for roles matching this résumé.`,
-              },
-            ],
-          }],
-        }),
-      });
+    for (let i = 0; i < effectiveIndustries.length; i++) {
+      const industry = effectiveIndustries[i];
+      setProgress({ current: i + 1, total: effectiveIndustries.length, industry });
 
-      const data = await res.json();
-      clearInterval(interval);
+      let msgIdx = 0;
+      setLoadingMsg(loadingMessages[0]);
+      const interval = setInterval(() => {
+        msgIdx = (msgIdx + 1) % loadingMessages.length;
+        setLoadingMsg(loadingMessages[msgIdx]);
+      }, 3500);
 
-      if (!res.ok) {
-        if (res.status === 429) {
-          throw new Error("rate_limit");
+      try {
+        const res = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: "claude-sonnet-4-20250514",
+            max_tokens: 5000,
+            system: buildSystemPrompt(jobTitle.trim(), industry, level),
+            tools: [{ type: "web_search_20250305", name: "web_search" }],
+            messages: [{
+              role: "user",
+              content: `Find 10 companies in the ${industry} industry that are actively hiring on their career pages for "${jobTitle.trim()}" or equivalent roles at the ${level} level. Return the JSON now.`,
+            }],
+          }),
+        });
+
+        const data = await res.json();
+        clearInterval(interval);
+
+        if (!res.ok) {
+          if (res.status === 429) throw new Error("rate_limit");
+          throw new Error(data.error?.message || "API request failed.");
         }
-        throw new Error(data.error?.message || "API request failed.");
+
+        const textBlocks = data.content?.filter((b) => b.type === "text") || [];
+        const lastText = textBlocks[textBlocks.length - 1]?.text;
+        if (!lastText) throw new Error("No response received.");
+
+        const cleaned = lastText.replace(/```json|```/g, "").trim();
+        const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+        if (!jsonMatch) throw new Error("Could not find JSON in response.");
+
+        const parsed = JSON.parse(jsonMatch[0]);
+        if (parsed.synonymTitles) {
+          parsed.synonymTitles.forEach((t) => allSynonyms.add(t));
+        }
+        allResults.push({ industry, ...parsed });
+      } catch (err) {
+        clearInterval(interval);
+        console.error(`Error searching ${industry}:`, err);
+        if (err.message === "rate_limit") {
+          setError("We're getting too many requests right now — please wait a minute and try again.");
+          hasError = true;
+          break;
+        }
+        allResults.push({ industry, companies: [], synonymTitles: [], error: true });
       }
-
-      const textBlocks = data.content?.filter((b) => b.type === "text") || [];
-      const lastText = textBlocks[textBlocks.length - 1]?.text;
-
-      if (!lastText) throw new Error("No response received.");
-
-      const cleaned = lastText.replace(/```json|```/g, "").trim();
-      const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) throw new Error("Could not find JSON in response.");
-      setResults(JSON.parse(jsonMatch[0]));
-    } catch (err) {
-      clearInterval(interval);
-      if (err.message === "rate_limit") {
-        setError("We're getting too many requests right now — please wait a minute and try again.");
-      } else {
-        setError("Something went wrong. Please try again.");
-      }
-      console.error(err);
-    } finally {
-      setLoading(false);
-      setLoadingMsg("");
     }
+
+    if (!hasError) {
+      setResults({
+        jobTitle: jobTitle.trim(),
+        level,
+        synonymTitles: [...allSynonyms],
+        industryResults: allResults,
+      });
+    }
+
+    setLoading(false);
+    setLoadingMsg("");
+    setProgress({ current: 0, total: 0, industry: "" });
   };
 
   const reset = () => {
     setResults(null);
-    setResume(null);
-    setResumeName("");
-    setIndustry("");
-    setOtherIndustry("");
+    setJobTitle("");
+    setIndustries([{ value: "", other: "" }]);
     setLevel("");
     setError("");
   };
 
+  const totalCompanies = results
+    ? results.industryResults.reduce((sum, r) => sum + (r.companies?.length || 0), 0)
+    : 0;
+
   return (
     <div style={{ fontFamily: "'DM Sans', sans-serif", minHeight: "100vh", background: C.cream, color: C.darkBrown }}>
       <style>{`
-        @import url('https://fonts.googleapis.com/css2?family=Sacramento&family=DM+Sans:wght@300;400;500&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Sacramento&family=DM+Sans:wght@300;400;500;700&display=swap');
         * { box-sizing: border-box; margin: 0; padding: 0; }
         .hdr { background: ${C.headerBg}; padding: 22px 36px; display: flex; align-items: center; gap: 14px; }
         .hdr-dot { width: 38px; height: 38px; background: ${C.accent}; border-radius: 50%; display: flex; align-items: center; justify-content: center; flex-shrink: 0; }
         .hdr-title { color: ${C.cream}; font-family: 'Sacramento', cursive; font-size: 28px; line-height: 1.1; }
         .hdr-sub { color: rgba(249,240,232,0.6); font-size: 11px; letter-spacing: 1.8px; text-transform: uppercase; margin-top: 3px; }
-        .main { max-width: 700px; margin: 0 auto; padding: 44px 24px; }
+        .main { max-width: 780px; margin: 0 auto; padding: 44px 24px; }
         .intro { margin-bottom: 36px; }
         .intro h2 { font-size: 28px; font-weight: 700; color: ${C.darkBrown}; line-height: 1.3; margin-bottom: 10px; }
         .intro p { font-size: 15px; color: ${C.medBrown}; line-height: 1.75; font-weight: 300; }
         .card { background: #fff; border: 1px solid ${C.blush}; border-radius: 14px; padding: 28px; margin-bottom: 16px; }
         .lbl { font-size: 11px; font-weight: 500; letter-spacing: 1.8px; text-transform: uppercase; color: ${C.medBrown}; margin-bottom: 10px; display: block; }
-        .upload-zone { border: 1.5px dashed ${C.blush}; border-radius: 10px; padding: 30px; text-align: center; cursor: pointer; transition: all .2s; background: ${C.cream}; }
-        .upload-zone:hover { border-color: ${C.accent}; background: #FFF3EE; }
-        .upload-zone.filled { border-color: ${C.forest}; border-style: solid; background: #F2F4EE; }
-        .upload-text { font-size: 14px; color: ${C.medBrown}; }
-        .upload-hint { font-size: 12px; color: ${C.blush}; margin-top: 5px; }
-        .upload-name { font-size: 13px; color: ${C.forest}; font-weight: 500; margin-top: 6px; }
-        select, .other-input { width: 100%; padding: 13px 16px; border: 1px solid ${C.blush}; border-radius: 8px; font-size: 14px; font-family: 'DM Sans', sans-serif; color: ${C.darkBrown}; transition: border-color .2s; }
-        select { appearance: none; background: ${C.cream}; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%2398543C' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 16px center; cursor: pointer; }
-        select:focus, .other-input:focus { outline: none; border-color: ${C.accent}; }
-        .other-input { margin-top: 10px; background: ${C.cream}; }
+        .text-input, select, .other-input { width: 100%; padding: 13px 16px; border: 1px solid ${C.blush}; border-radius: 8px; font-size: 14px; font-family: 'DM Sans', sans-serif; color: ${C.darkBrown}; transition: border-color .2s; background: ${C.cream}; }
+        .text-input::placeholder { color: ${C.blush}; }
+        select { appearance: none; background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8' viewBox='0 0 12 8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%2398543C' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E"); background-repeat: no-repeat; background-position: right 16px center; cursor: pointer; }
+        .text-input:focus, select:focus, .other-input:focus { outline: none; border-color: ${C.accent}; }
+        .other-input { margin-top: 10px; }
         .other-input::placeholder { color: ${C.blush}; }
+        .ind-row { display: flex; gap: 10px; align-items: flex-start; margin-bottom: 10px; }
+        .ind-row:last-child { margin-bottom: 0; }
+        .ind-row select { flex: 1; }
+        .ind-remove { width: 38px; height: 46px; flex-shrink: 0; border: 1px solid ${C.blush}; border-radius: 8px; background: ${C.cream}; color: ${C.medBrown}; font-size: 18px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: all .2s; }
+        .ind-remove:hover { border-color: ${C.rust}; color: ${C.rust}; background: #FEF0EE; }
+        .add-ind-btn { display: inline-flex; align-items: center; gap: 6px; background: none; border: none; color: ${C.forest}; font-size: 13px; font-weight: 500; cursor: pointer; padding: 8px 0 0; font-family: 'DM Sans', sans-serif; transition: color .2s; }
+        .add-ind-btn:hover { color: ${C.accent}; }
+        .add-ind-btn:disabled { color: ${C.blush}; cursor: not-allowed; }
         .btn { width: 100%; padding: 17px; background: ${C.headerBg}; color: ${C.cream}; border: none; border-radius: 10px; font-size: 15px; font-weight: 500; cursor: pointer; transition: all .2s; margin-top: 6px; font-family: 'DM Sans', sans-serif; }
         .btn:hover:not(:disabled) { background: ${C.medBrown}; }
         .btn:disabled { opacity: .4; cursor: not-allowed; }
@@ -262,15 +249,23 @@ export default function CareerCompanyFinder() {
         @keyframes spin { to { transform: rotate(360deg); } }
         .loading-msg { font-size: 16px; color: ${C.medBrown}; font-weight: 300; }
         .loading-hint { font-size: 12px; color: ${C.blush}; margin-top: 8px; }
+        .loading-progress { font-size: 13px; color: ${C.forest}; font-weight: 500; margin-bottom: 14px; }
+        .progress-bar-wrap { width: 200px; height: 4px; background: ${C.blush}; border-radius: 4px; margin: 0 auto 20px; overflow: hidden; }
+        .progress-bar-fill { height: 100%; background: ${C.accent}; border-radius: 4px; transition: width .5s ease; }
         .results-header { margin-bottom: 28px; }
         .results-header h2 { font-size: 26px; font-weight: 700; color: ${C.darkBrown}; margin-bottom: 6px; }
         .results-meta { font-size: 14px; color: ${C.medBrown}; font-weight: 300; }
         .results-meta strong { color: ${C.forest}; font-weight: 500; }
-        .tags-row { display: flex; flex-wrap: wrap; gap: 8px; margin: 14px 0 28px; }
-        .skill-tag { background: #F2F4EE; border: 1px solid ${C.sage}; color: ${C.forest}; font-size: 12px; font-weight: 500; padding: 5px 12px; border-radius: 20px; }
-        .title-tag { background: #FFF3EE; border: 1px solid ${C.accent}; color: ${C.darkBrown}; font-size: 12px; font-weight: 500; padding: 5px 12px; border-radius: 20px; }
+        .synonyms-section { background: #FFF3EE; border: 1px solid ${C.accent}; border-radius: 12px; padding: 20px 24px; margin-bottom: 28px; }
+        .synonyms-title { font-size: 11px; font-weight: 500; letter-spacing: 1.8px; text-transform: uppercase; color: ${C.rust}; margin-bottom: 12px; }
+        .synonyms-row { display: flex; flex-wrap: wrap; gap: 8px; }
+        .synonym-tag { background: #fff; border: 1px solid ${C.accent}; color: ${C.darkBrown}; font-size: 13px; font-weight: 500; padding: 6px 14px; border-radius: 20px; }
+        .industry-section { margin-bottom: 36px; }
+        .industry-header { background: ${C.headerBg}; color: ${C.cream}; padding: 16px 22px; border-radius: 12px; margin-bottom: 16px; display: flex; align-items: center; justify-content: space-between; }
+        .industry-header h3 { font-size: 18px; font-weight: 700; margin: 0; }
+        .industry-count { font-size: 12px; color: ${C.accent}; font-weight: 500; letter-spacing: 1px; text-transform: uppercase; }
+        .industry-error { background: #FEF0EE; border: 1px solid ${C.accent}; border-radius: 10px; padding: 16px 20px; color: ${C.rust}; font-size: 13px; text-align: center; }
         .divider { height: 1px; background: ${C.blush}; margin: 24px 0; opacity: .5; }
-        .sec-lbl { font-size: 11px; font-weight: 500; letter-spacing: 1.8px; text-transform: uppercase; color: ${C.medBrown}; margin-bottom: 14px; }
         .co-card { background: #fff; border: 1px solid ${C.blush}; border-left: 4px solid ${C.accent}; border-radius: 14px; padding: 24px; margin-bottom: 14px; transition: box-shadow .2s; }
         .co-card:hover { box-shadow: 0 4px 18px rgba(110,54,17,.08); }
         .co-num { font-size: 11px; font-weight: 500; letter-spacing: 1.5px; color: ${C.accent}; text-transform: uppercase; margin-bottom: 5px; }
@@ -294,7 +289,7 @@ export default function CareerCompanyFinder() {
         </div>
         <div>
           <div className="hdr-title">Career Company Finder</div>
-          <div className="hdr-sub">Find Your Fulfilling Career · FYFC Tool</div>
+          <div className="hdr-sub">Find Your Fulfilling Career &middot; FYFC Tool</div>
         </div>
       </div>
 
@@ -303,60 +298,76 @@ export default function CareerCompanyFinder() {
           <>
             <div className="intro">
               <h2>Find companies actively hiring for roles that fit you.</h2>
-              <p>Upload your résumé, choose your target industry, and this tool will search company career pages — not job boards — to find 10 organizations with active openings that match your background.</p>
+              <p>Enter your target job title, choose up to 3 industries, and this tool will search company career pages — not job boards — to find organizations with active openings that match your background.</p>
             </div>
 
             {error && <div className="err">{error}</div>}
 
+            {/* Job Title */}
             <div className="card">
-              <span className="lbl">Your résumé</span>
-              <div className={`upload-zone ${resume ? "filled" : ""}`} onClick={() => fileRef.current.click()}>
-                <input ref={fileRef} type="file" accept=".pdf" style={{ display: "none" }} onChange={handleFile} />
-                {resume ? (
-                  <>
-                    <div style={{ fontSize: 28, marginBottom: 6 }}>✓</div>
-                    <div className="upload-name">{resumeName}</div>
-                    <div className="upload-hint" style={{ color: C.forest }}>Uploaded — click to replace</div>
-                  </>
-                ) : (
-                  <>
-                    <svg style={{ width: 32, height: 32, margin: "0 auto 10px", display: "block", color: C.blush }} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12"/>
-                    </svg>
-                    <div className="upload-text">Click to upload your résumé</div>
-                    <div className="upload-hint">PDF format only</div>
-                  </>
-                )}
-              </div>
+              <span className="lbl">Job title</span>
+              <input
+                className="text-input"
+                type="text"
+                placeholder="e.g. Program Manager"
+                value={jobTitle}
+                onChange={(e) => setJobTitle(e.target.value)}
+              />
             </div>
 
+            {/* Industries (1-3) */}
             <div className="card">
-              <span className="lbl">Target industry</span>
-              <select value={industry} onChange={(e) => { setIndustry(e.target.value); setOtherIndustry(""); }}>
-                <option value="">Select an industry...</option>
-                {INDUSTRIES.map(ind => <option key={ind} value={ind}>{ind}</option>)}
-              </select>
-              {industry === "Other" && (
-                <input
-                  className="other-input"
-                  type="text"
-                  placeholder="Type your industry here..."
-                  value={otherIndustry}
-                  onChange={(e) => setOtherIndustry(e.target.value)}
-                />
+              <span className="lbl">Target {industries.length > 1 ? "industries" : "industry"}</span>
+              {industries.map((ind, idx) => (
+                <div key={idx}>
+                  <div className="ind-row">
+                    <select
+                      value={ind.value}
+                      onChange={(e) => updateIndustry(idx, "value", e.target.value)}
+                    >
+                      <option value="">Select an industry...</option>
+                      {INDUSTRIES.map((name) => (
+                        <option key={name} value={name}>{name}</option>
+                      ))}
+                    </select>
+                    {industries.length > 1 && (
+                      <button className="ind-remove" onClick={() => removeIndustry(idx)} title="Remove">
+                        &times;
+                      </button>
+                    )}
+                  </div>
+                  {ind.value === "Other" && (
+                    <input
+                      className="other-input"
+                      type="text"
+                      placeholder="Type your industry here..."
+                      value={ind.other}
+                      onChange={(e) => updateIndustry(idx, "other", e.target.value)}
+                      style={{ marginBottom: 10 }}
+                    />
+                  )}
+                </div>
+              ))}
+              {industries.length < 3 && (
+                <button className="add-ind-btn" onClick={addIndustry}>
+                  <span style={{ fontSize: 16, fontWeight: 700 }}>+</span> Add another industry
+                </button>
               )}
             </div>
 
+            {/* Seniority Level */}
             <div className="card">
               <span className="lbl">Seniority level</span>
               <select value={level} onChange={(e) => setLevel(e.target.value)}>
                 <option value="">Select a level...</option>
-                {LEVELS.map(l => <option key={l} value={l}>{l}</option>)}
+                {LEVELS.map((l) => <option key={l} value={l}>{l}</option>)}
               </select>
             </div>
 
-            <button className="btn" onClick={handleSearch} disabled={!resume || !effectiveIndustry || !level}>
-              Find my 10 companies →
+            <button className="btn" onClick={handleSearch} disabled={!canSearch()}>
+              {getEffectiveIndustries().length > 1
+                ? `Find companies across ${getEffectiveIndustries().length} industries →`
+                : "Find my 10 companies →"}
             </button>
           </>
         )}
@@ -364,42 +375,89 @@ export default function CareerCompanyFinder() {
         {loading && (
           <div className="loading-state">
             <div className="spinner" />
+            {progress.total > 1 && (
+              <>
+                <div className="loading-progress">
+                  Searching industry {progress.current} of {progress.total}: {progress.industry}
+                </div>
+                <div className="progress-bar-wrap">
+                  <div
+                    className="progress-bar-fill"
+                    style={{ width: `${(progress.current / progress.total) * 100}%` }}
+                  />
+                </div>
+              </>
+            )}
             <div className="loading-msg">{loadingMsg}</div>
-            <div className="loading-hint">Searching company career pages — this takes about 30–60 seconds.</div>
+            <div className="loading-hint">
+              Searching company career pages — this takes about {progress.total > 1 ? "30–60 seconds per industry" : "30–60 seconds"}.
+            </div>
           </div>
         )}
 
         {results && !loading && (
           <>
             <div className="results-header">
-              <h2>Your 10 target companies</h2>
-              <p className="results-meta">Industry: <strong>{effectiveIndustry}</strong>&nbsp;·&nbsp;Level: <strong>{level}</strong></p>
+              <h2>Your target companies</h2>
+              <p className="results-meta">
+                Job title: <strong>{results.jobTitle}</strong>&nbsp;&middot;&nbsp;
+                Level: <strong>{results.level}</strong>&nbsp;&middot;&nbsp;
+                <strong>{totalCompanies}</strong> companies found
+              </p>
             </div>
-            <div className="sec-lbl">Extracted from your résumé</div>
-            <div className="tags-row">
-              {results.skills?.map((s, i) => <span key={i} className="skill-tag">{s}</span>)}
-              {results.titles?.map((t, i) => <span key={i} className="title-tag">{t}</span>)}
-            </div>
-            <div className="divider" />
-            {results.companies?.map((c, i) => (
-              <div key={i} className="co-card">
-                <div className="co-num">Company {String(i + 1).padStart(2, "0")}</div>
-                <div className="co-name">{c.name}</div>
-                <div className="roles-row">
-                  {c.roles?.map((r, j) => <span key={j} className="role-pill">{r}</span>)}
+
+            {/* Synonym Titles */}
+            {results.synonymTitles?.length > 0 && (
+              <div className="synonyms-section">
+                <div className="synonyms-title">Synonym titles found</div>
+                <div className="synonyms-row">
+                  {results.synonymTitles.map((t, i) => (
+                    <span key={i} className="synonym-tag">{t}</span>
+                  ))}
                 </div>
-                <div className="co-why">{c.whyItFits}</div>
-                {c.hiringSignal && <div className="co-signal"><strong>Hiring signal:</strong> {c.hiringSignal}</div>}
-                {c.careersUrl && (
-                  <a href={c.careersUrl} target="_blank" rel="noopener noreferrer" className="co-link">
-                    View careers page
-                    <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
-                      <path d="M1 11L11 1M11 1H4M11 1v7"/>
-                    </svg>
-                  </a>
+              </div>
+            )}
+
+            {/* Industry-grouped results */}
+            {results.industryResults.map((ir, idx) => (
+              <div key={idx} className="industry-section">
+                <div className="industry-header">
+                  <h3>{ir.industry}</h3>
+                  <span className="industry-count">
+                    {ir.error ? "Search failed" : `${ir.companies?.length || 0} companies`}
+                  </span>
+                </div>
+
+                {ir.error ? (
+                  <div className="industry-error">
+                    Could not complete the search for this industry. Try searching again.
+                  </div>
+                ) : (
+                  ir.companies?.map((c, i) => (
+                    <div key={i} className="co-card">
+                      <div className="co-num">Company {String(i + 1).padStart(2, "0")}</div>
+                      <div className="co-name">{c.name}</div>
+                      <div className="roles-row">
+                        {c.roles?.map((r, j) => <span key={j} className="role-pill">{r}</span>)}
+                      </div>
+                      <div className="co-why">{c.whyItFits}</div>
+                      {c.hiringSignal && (
+                        <div className="co-signal"><strong>Hiring signal:</strong> {c.hiringSignal}</div>
+                      )}
+                      {c.careersUrl && (
+                        <a href={c.careersUrl} target="_blank" rel="noopener noreferrer" className="co-link">
+                          View careers page
+                          <svg width="11" height="11" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+                            <path d="M1 11L11 1M11 1H4M11 1v7"/>
+                          </svg>
+                        </a>
+                      )}
+                    </div>
+                  ))
                 )}
               </div>
             ))}
+
             <button className="reset-btn" onClick={reset}>Start a new search</button>
           </>
         )}
