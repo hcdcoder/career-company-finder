@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 
 const C = {
   headerBg: "#6E3611",
@@ -39,16 +39,49 @@ const LEVELS = [
   "Any Level",
 ];
 
+const SEARCH_LIMIT = 3;
+const LIMIT_KEY = "ccf_search_usage";
+
+/* ── Search limit helpers (localStorage, 3 per 24h) ── */
+function getSearchUsage() {
+  try {
+    const raw = localStorage.getItem(LIMIT_KEY);
+    if (!raw) return { count: 0, resetAt: 0 };
+    const data = JSON.parse(raw);
+    if (Date.now() >= data.resetAt) return { count: 0, resetAt: 0 };
+    return data;
+  } catch { return { count: 0, resetAt: 0 }; }
+}
+
+function recordSearch() {
+  const usage = getSearchUsage();
+  const newCount = usage.count + 1;
+  const resetAt = usage.resetAt > Date.now() ? usage.resetAt : Date.now() + 24 * 60 * 60 * 1000;
+  localStorage.setItem(LIMIT_KEY, JSON.stringify({ count: newCount, resetAt }));
+  return newCount;
+}
+
+function remainingSearches() {
+  return Math.max(0, SEARCH_LIMIT - getSearchUsage().count);
+}
+
+/* ── System prompt builder ── */
 function buildSystemPrompt(jobTitle, industry, level) {
   return `You are a job search strategist inside a career coaching program called Find Your Fulfilling Career (FYFC), created by Dr. Tega Edwin (Her Career Doctor).
 
 Your job is to find 10 real companies that are actively hiring on their own career pages — NOT from job boards like Indeed, LinkedIn, or Glassdoor — for roles matching the job title "${jobTitle}" (or equivalent/synonym titles) in the ${industry} industry at the ${level} seniority level.
 
+CRITICAL EVIDENCE REQUIREMENT:
+- ONLY include a company if you found DIRECT EVIDENCE of an active, current job posting on that company's own careers page for "${jobTitle}" or a closely related synonym title.
+- Do NOT include companies that are merely "known to hire" for this type of role or that "typically have openings" — you must have found a specific, currently-listed job posting.
+- If you cannot find 10 companies with verified active postings, return fewer rather than padding with unverified companies.
+
 INSTRUCTIONS:
 1. First, identify 3-6 synonym or equivalent job titles for "${jobTitle}" in the ${industry} industry. Think about what different companies might call this same type of role.
 2. Use web search to find companies in the ${industry} industry that have active openings on their company career pages matching "${jobTitle}" or any of the synonym titles you identified.
 3. Focus on companies that post jobs on their own careers site (e.g. company.com/careers), not aggregators.
-4. Return EXACTLY 10 companies.
+4. For each company, record the SPECIFIC job title you found evidence of in the "searchTitle" field. This is the exact title the user should search for on that company's careers page.
+5. Return up to 10 companies.
 
 RESPOND ONLY WITH A VALID JSON OBJECT — no preamble, no markdown, no backticks. Follow this exact structure:
 {
@@ -58,36 +91,25 @@ RESPOND ONLY WITH A VALID JSON OBJECT — no preamble, no markdown, no backticks
       "name": "Company Name",
       "careersUrl": "https://company.com/careers",
       "roles": ["Role Title 1", "Role Title 2"],
+      "searchTitle": "The specific job title found on this company's career page",
       "whyItFits": "One sentence explaining why this company is a strong match.",
-      "hiringSignal": "Brief note on what signals they are actively hiring."
+      "hiringSignal": "Brief note on what direct evidence you found of this active posting."
     }
   ]
 }`;
 }
 
-/**
- * Robustly extract a JSON object from messy LLM text output.
- * Tries multiple strategies: direct parse, regex extraction, bracket-balanced extraction,
- * and truncated-JSON repair.
- */
+/* ── Robust JSON extraction ── */
 function extractJSON(raw) {
-  // Strip markdown code fences and trim
   const cleaned = raw.replace(/```json\s*/gi, "").replace(/```/g, "").trim();
-
-  // Strategy 1: Direct parse (cleanest case)
   try {
     const parsed = JSON.parse(cleaned);
     if (parsed && typeof parsed === "object") return parsed;
   } catch (_) {}
 
-  // Strategy 2: Find the outermost { ... } using bracket balancing
   const start = cleaned.indexOf("{");
   if (start !== -1) {
-    let depth = 0;
-    let inString = false;
-    let escaped = false;
-    let end = -1;
-
+    let depth = 0, inString = false, escaped = false, end = -1;
     for (let i = start; i < cleaned.length; i++) {
       const ch = cleaned[i];
       if (escaped) { escaped = false; continue; }
@@ -97,43 +119,25 @@ function extractJSON(raw) {
       if (ch === "{") depth++;
       if (ch === "}") { depth--; if (depth === 0) { end = i; break; } }
     }
-
     if (end !== -1) {
-      try {
-        return JSON.parse(cleaned.slice(start, end + 1));
-      } catch (_) {}
+      try { return JSON.parse(cleaned.slice(start, end + 1)); } catch (_) {}
     }
-
-    // Strategy 3: Greedy regex fallback (handles cases bracket balancing missed)
     const greedyMatch = cleaned.match(/\{[\s\S]*\}/);
     if (greedyMatch) {
-      try {
-        return JSON.parse(greedyMatch[0]);
-      } catch (_) {}
+      try { return JSON.parse(greedyMatch[0]); } catch (_) {}
     }
-
-    // Strategy 4: Truncated JSON repair — close open brackets/braces
-    const fragment = cleaned.slice(start);
-    const repaired = repairTruncatedJSON(fragment);
+    const repaired = repairTruncatedJSON(cleaned.slice(start));
     if (repaired) {
-      try {
-        return JSON.parse(repaired);
-      } catch (_) {}
+      try { return JSON.parse(repaired); } catch (_) {}
     }
   }
-
   return null;
 }
 
-/** Attempt to close unclosed brackets/braces in truncated JSON */
 function repairTruncatedJSON(str) {
-  // Remove any trailing incomplete string value (unmatched quote)
   let s = str.replace(/,\s*"[^"]*$/, "").replace(/,\s*$/, "");
-
-  let inString = false;
-  let escaped = false;
+  let inString = false, escaped = false;
   const stack = [];
-
   for (let i = 0; i < s.length; i++) {
     const ch = s[i];
     if (escaped) { escaped = false; continue; }
@@ -144,19 +148,184 @@ function repairTruncatedJSON(str) {
     if (ch === "}") { if (stack.length && stack[stack.length - 1] === "{") stack.pop(); }
     if (ch === "]") { if (stack.length && stack[stack.length - 1] === "[") stack.pop(); }
   }
-
-  // If still inside a string, close it
   if (inString) s += '"';
-
-  // Close all remaining open brackets/braces in reverse order
   while (stack.length) {
     const open = stack.pop();
     s += open === "{" ? "}" : "]";
   }
-
   return s;
 }
 
+/* ── Download helpers ── */
+function downloadCSV(results) {
+  const rows = [["Industry", "Company Number", "Company Name", "Roles", "Search Title", "Why It Fits", "Hiring Signal", "Careers URL"]];
+  results.industryResults.forEach((ir) => {
+    (ir.companies || []).forEach((c, i) => {
+      rows.push([
+        ir.industry,
+        String(i + 1),
+        c.name || "",
+        (c.roles || []).join("; "),
+        c.searchTitle || "",
+        c.whyItFits || "",
+        c.hiringSignal || "",
+        c.careersUrl || "",
+      ]);
+    });
+  });
+  const csv = rows.map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "Career-Company-Finder-Results.csv";
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function downloadPDF(results) {
+  const lines = [];
+  const add = (text) => lines.push(text);
+  const gap = () => lines.push("");
+
+  add("CAREER COMPANY FINDER RESULTS");
+  add("=".repeat(50));
+  add(`Job Title: ${results.jobTitle}`);
+  add(`Seniority Level: ${results.level}`);
+  const total = results.industryResults.reduce((s, r) => s + (r.companies?.length || 0), 0);
+  add(`Total Companies Found: ${total}`);
+  gap();
+
+  if (results.synonymTitles?.length) {
+    add("SYNONYM TITLES FOUND");
+    add("-".repeat(30));
+    add(results.synonymTitles.join(", "));
+    gap();
+  }
+
+  results.industryResults.forEach((ir) => {
+    add(`${"=".repeat(50)}`);
+    add(`INDUSTRY: ${ir.industry.toUpperCase()}`);
+    add(`Companies: ${ir.companies?.length || 0}`);
+    add("=".repeat(50));
+    gap();
+
+    (ir.companies || []).forEach((c, i) => {
+      add(`${String(i + 1).padStart(2, "0")}. ${c.name}`);
+      if (c.roles?.length) add(`    Roles: ${c.roles.join(", ")}`);
+      if (c.searchTitle) add(`    Search for: "${c.searchTitle}"`);
+      if (c.whyItFits) add(`    Why it fits: ${c.whyItFits}`);
+      if (c.hiringSignal) add(`    Hiring signal: ${c.hiringSignal}`);
+      if (c.careersUrl) add(`    Careers page: ${c.careersUrl}`);
+      gap();
+    });
+  });
+
+  add("-".repeat(50));
+  add("Generated by Career Company Finder — FYFC Tool");
+  add("Created by Dr. Tega Edwin (Her Career Doctor)");
+
+  const text = lines.join("\n");
+
+  // Build a simple PDF manually (no library needed)
+  const pdfLines = text.split("\n");
+  const pageWidth = 595.28;
+  const pageHeight = 841.89;
+  const margin = 50;
+  const lineHeight = 14;
+  const maxLineWidth = pageWidth - margin * 2;
+  const charWidth = 6; // approximate for Courier 10pt
+  const maxCharsPerLine = Math.floor(maxLineWidth / charWidth);
+
+  // Word-wrap long lines
+  const wrappedLines = [];
+  pdfLines.forEach((line) => {
+    if (line.length <= maxCharsPerLine) {
+      wrappedLines.push(line);
+    } else {
+      let remaining = line;
+      while (remaining.length > maxCharsPerLine) {
+        let breakIdx = remaining.lastIndexOf(" ", maxCharsPerLine);
+        if (breakIdx <= 0) breakIdx = maxCharsPerLine;
+        wrappedLines.push(remaining.slice(0, breakIdx));
+        remaining = remaining.slice(breakIdx).trimStart();
+      }
+      if (remaining) wrappedLines.push(remaining);
+    }
+  });
+
+  // Paginate
+  const usableHeight = pageHeight - margin * 2;
+  const linesPerPage = Math.floor(usableHeight / lineHeight);
+  const pages = [];
+  for (let i = 0; i < wrappedLines.length; i += linesPerPage) {
+    pages.push(wrappedLines.slice(i, i + linesPerPage));
+  }
+
+  // PDF object builder
+  const objects = [];
+  let objNum = 0;
+  const addObj = (content) => { objNum++; objects.push({ num: objNum, content }); return objNum; };
+
+  // 1: Catalog
+  const catalogNum = addObj(""); // placeholder
+  // 2: Pages
+  const pagesNum = addObj(""); // placeholder
+  // 3: Font
+  const fontNum = addObj("<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>");
+
+  // Page objects
+  const pageObjNums = [];
+  const streamObjNums = [];
+  pages.forEach((pageLines) => {
+    // Stream content
+    let stream = "BT\n/F1 10 Tf\n";
+    stream += `${margin} ${pageHeight - margin} Td\n`;
+    stream += `${lineHeight} TL\n`;
+    pageLines.forEach((line) => {
+      const escaped = line.replace(/\\/g, "\\\\").replace(/\(/g, "\\(").replace(/\)/g, "\\)");
+      stream += `(${escaped}) '\n`;
+    });
+    stream += "ET";
+    const streamNum = addObj(`<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`);
+    streamObjNums.push(streamNum);
+    const pageNum = addObj(""); // placeholder
+    pageObjNums.push(pageNum);
+  });
+
+  // Now fill in placeholders
+  objects[catalogNum - 1].content = `<< /Type /Catalog /Pages ${pagesNum} 0 R >>`;
+  const kidRefs = pageObjNums.map((n) => `${n} 0 R`).join(" ");
+  objects[pagesNum - 1].content = `<< /Type /Pages /Kids [${kidRefs}] /Count ${pages.length} >>`;
+  pageObjNums.forEach((pNum, idx) => {
+    objects[pNum - 1].content = `<< /Type /Page /Parent ${pagesNum} 0 R /MediaBox [0 0 ${pageWidth} ${pageHeight}] /Contents ${streamObjNums[idx]} 0 R /Resources << /Font << /F1 ${fontNum} 0 R >> >> >>`;
+  });
+
+  // Build PDF bytes
+  let pdf = "%PDF-1.4\n";
+  const offsets = [];
+  objects.forEach((obj) => {
+    offsets.push(pdf.length);
+    pdf += `${obj.num} 0 obj\n${obj.content}\nendobj\n`;
+  });
+  const xrefOffset = pdf.length;
+  pdf += `xref\n0 ${objects.length + 1}\n`;
+  pdf += "0000000000 65535 f \n";
+  offsets.forEach((off) => {
+    pdf += `${String(off).padStart(10, "0")} 00000 n \n`;
+  });
+  pdf += `trailer\n<< /Size ${objects.length + 1} /Root ${catalogNum} 0 R >>\nstartxref\n${xrefOffset}\n%%EOF`;
+
+  const blob = new Blob([pdf], { type: "application/pdf" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "Career-Company-Finder-Results.pdf";
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+/* ── Main Component ── */
 export default function CareerCompanyFinder() {
   const [jobTitle,    setJobTitle]    = useState("");
   const [industries,  setIndustries]  = useState([{ value: "", other: "" }]);
@@ -166,6 +335,17 @@ export default function CareerCompanyFinder() {
   const [error,       setError]       = useState("");
   const [loadingMsg,  setLoadingMsg]  = useState("");
   const [progress,    setProgress]    = useState({ current: 0, total: 0, industry: "" });
+  const [searches,    setSearches]    = useState(remainingSearches);
+
+  // Refresh search count on mount and periodically
+  useEffect(() => {
+    const check = () => setSearches(remainingSearches());
+    check();
+    const interval = setInterval(check, 60000);
+    return () => clearInterval(interval);
+  }, []);
+
+  const limitReached = searches <= 0;
 
   const loadingMessages = [
     "Identifying synonym job titles...",
@@ -176,32 +356,26 @@ export default function CareerCompanyFinder() {
   ];
 
   const addIndustry = () => {
-    if (industries.length < 3) {
-      setIndustries([...industries, { value: "", other: "" }]);
-    }
+    if (industries.length < 3) setIndustries([...industries, { value: "", other: "" }]);
   };
-
-  const removeIndustry = (idx) => {
-    setIndustries(industries.filter((_, i) => i !== idx));
-  };
-
+  const removeIndustry = (idx) => setIndustries(industries.filter((_, i) => i !== idx));
   const updateIndustry = (idx, field, val) => {
     const updated = [...industries];
     updated[idx] = { ...updated[idx], [field]: val };
     if (field === "value") updated[idx].other = "";
     setIndustries(updated);
   };
-
-  const getEffectiveIndustries = () =>
-    industries
-      .map((ind) => (ind.value === "Other" ? ind.other.trim() : ind.value))
-      .filter(Boolean);
-
-  const canSearch = () => {
-    return jobTitle.trim() && getEffectiveIndustries().length > 0 && level;
-  };
+  const getEffectiveIndustries = useCallback(() =>
+    industries.map((ind) => (ind.value === "Other" ? ind.other.trim() : ind.value)).filter(Boolean),
+    [industries]
+  );
+  const canSearch = () => jobTitle.trim() && getEffectiveIndustries().length > 0 && level && !limitReached;
 
   const handleSearch = async () => {
+    if (limitReached) {
+      setError("You've reached your daily limit — check back tomorrow.");
+      return;
+    }
     const effectiveIndustries = getEffectiveIndustries();
     if (!jobTitle.trim() || effectiveIndustries.length === 0 || !level) {
       setError("Please enter a job title, select at least one industry, and choose a level.");
@@ -210,6 +384,10 @@ export default function CareerCompanyFinder() {
     setError("");
     setResults(null);
     setLoading(true);
+
+    // Record this search against the daily limit
+    recordSearch();
+    setSearches(remainingSearches());
 
     const allResults = [];
     const allSynonyms = new Set();
@@ -239,7 +417,7 @@ export default function CareerCompanyFinder() {
             tools: [{ type: "web_search_20250305", name: "web_search" }],
             messages: [{
               role: "user",
-              content: `Find 10 companies in the ${industry} industry that are actively hiring on their career pages for "${jobTitle.trim()}" or equivalent roles at the ${level} level. Return the JSON now.`,
+              content: `Find 10 companies in the ${industry} industry that are actively hiring on their career pages for "${jobTitle.trim()}" or equivalent roles at the ${level} level. Only include companies where you found direct evidence of a current job posting. Include the searchTitle field for each company. Return the JSON now.`,
             }],
           }),
         });
@@ -253,7 +431,6 @@ export default function CareerCompanyFinder() {
         }
 
         const textBlocks = data.content?.filter((b) => b.type === "text") || [];
-        // Combine ALL text blocks — sometimes JSON is split across multiple blocks
         const allText = textBlocks.map((b) => b.text).join("\n");
         if (!allText.trim()) throw new Error("No response received.");
 
@@ -296,6 +473,7 @@ export default function CareerCompanyFinder() {
     setIndustries([{ value: "", other: "" }]);
     setLevel("");
     setError("");
+    setSearches(remainingSearches());
   };
 
   const totalCompanies = results
@@ -335,6 +513,9 @@ export default function CareerCompanyFinder() {
         .btn:hover:not(:disabled) { background: ${C.medBrown}; }
         .btn:disabled { opacity: .4; cursor: not-allowed; }
         .err { background: #FEF0EE; border: 1px solid ${C.accent}; border-radius: 8px; padding: 13px 18px; color: ${C.rust}; font-size: 13px; margin-bottom: 18px; }
+        .limit-banner { background: #FEF0EE; border: 1px solid ${C.rust}; border-radius: 10px; padding: 18px 22px; text-align: center; margin-bottom: 18px; }
+        .limit-banner p { font-size: 15px; color: ${C.rust}; font-weight: 500; }
+        .searches-left { font-size: 12px; color: ${C.medBrown}; text-align: center; margin-top: 10px; }
         .loading-state { text-align: center; padding: 64px 20px; }
         .spinner { width: 44px; height: 44px; border: 2px solid ${C.blush}; border-top-color: ${C.accent}; border-radius: 50%; animation: spin .9s linear infinite; margin: 0 auto 22px; }
         @keyframes spin { to { transform: rotate(360deg); } }
@@ -343,10 +524,15 @@ export default function CareerCompanyFinder() {
         .loading-progress { font-size: 13px; color: ${C.forest}; font-weight: 500; margin-bottom: 14px; }
         .progress-bar-wrap { width: 200px; height: 4px; background: ${C.blush}; border-radius: 4px; margin: 0 auto 20px; overflow: hidden; }
         .progress-bar-fill { height: 100%; background: ${C.accent}; border-radius: 4px; transition: width .5s ease; }
-        .results-header { margin-bottom: 28px; }
+        .results-header { margin-bottom: 10px; }
         .results-header h2 { font-size: 26px; font-weight: 700; color: ${C.darkBrown}; margin-bottom: 6px; }
         .results-meta { font-size: 14px; color: ${C.medBrown}; font-weight: 300; }
         .results-meta strong { color: ${C.forest}; font-weight: 500; }
+        .disclaimer { background: ${C.cream}; border: 1px solid ${C.blush}; border-radius: 8px; padding: 12px 16px; margin-bottom: 16px; display: flex; align-items: flex-start; gap: 10px; }
+        .disclaimer-icon { flex-shrink: 0; margin-top: 1px; color: ${C.medBrown}; }
+        .disclaimer p { font-size: 12px; color: ${C.medBrown}; line-height: 1.55; font-style: italic; }
+        .action-banner { background: ${C.forest}; color: #fff; border-radius: 10px; padding: 16px 22px; margin-bottom: 22px; }
+        .action-banner p { font-size: 14px; line-height: 1.6; font-weight: 300; }
         .synonyms-section { background: #FFF3EE; border: 1px solid ${C.accent}; border-radius: 12px; padding: 20px 24px; margin-bottom: 28px; }
         .synonyms-title { font-size: 11px; font-weight: 500; letter-spacing: 1.8px; text-transform: uppercase; color: ${C.rust}; margin-bottom: 12px; }
         .synonyms-row { display: flex; flex-wrap: wrap; gap: 8px; }
@@ -356,7 +542,6 @@ export default function CareerCompanyFinder() {
         .industry-header h3 { font-size: 18px; font-weight: 700; margin: 0; }
         .industry-count { font-size: 12px; color: ${C.accent}; font-weight: 500; letter-spacing: 1px; text-transform: uppercase; }
         .industry-error { background: #FEF0EE; border: 1px solid ${C.accent}; border-radius: 10px; padding: 16px 20px; color: ${C.rust}; font-size: 13px; text-align: center; }
-        .divider { height: 1px; background: ${C.blush}; margin: 24px 0; opacity: .5; }
         .co-card { background: #fff; border: 1px solid ${C.blush}; border-left: 4px solid ${C.accent}; border-radius: 14px; padding: 24px; margin-bottom: 14px; transition: box-shadow .2s; }
         .co-card:hover { box-shadow: 0 4px 18px rgba(110,54,17,.08); }
         .co-num { font-size: 11px; font-weight: 500; letter-spacing: 1.5px; color: ${C.accent}; text-transform: uppercase; margin-bottom: 5px; }
@@ -368,6 +553,16 @@ export default function CareerCompanyFinder() {
         .co-signal strong { color: ${C.rust}; }
         .co-link { display: inline-flex; align-items: center; gap: 6px; margin-top: 14px; font-size: 13px; font-weight: 500; color: ${C.forest}; text-decoration: none; border-bottom: 1px solid ${C.sage}; padding-bottom: 1px; transition: color .2s; }
         .co-link:hover { color: ${C.accent}; border-bottom-color: ${C.accent}; }
+        .search-instruction { background: ${C.cream}; border: 1px solid ${C.sage}; border-radius: 8px; padding: 10px 14px; margin-top: 12px; display: flex; align-items: center; gap: 8px; }
+        .search-instruction .si-icon { flex-shrink: 0; color: ${C.forest}; }
+        .search-instruction p { font-size: 13px; color: ${C.darkBrown}; }
+        .search-instruction strong { color: ${C.forest}; font-weight: 700; }
+        .download-row { display: flex; gap: 12px; margin-top: 24px; margin-bottom: 10px; }
+        .dl-btn { flex: 1; padding: 14px; border-radius: 10px; font-size: 14px; font-weight: 500; cursor: pointer; font-family: 'DM Sans', sans-serif; display: flex; align-items: center; justify-content: center; gap: 8px; transition: all .2s; }
+        .dl-pdf { background: ${C.headerBg}; color: ${C.cream}; border: none; }
+        .dl-pdf:hover { background: ${C.medBrown}; }
+        .dl-csv { background: #fff; color: ${C.darkBrown}; border: 1px solid ${C.blush}; }
+        .dl-csv:hover { border-color: ${C.darkBrown}; }
         .reset-btn { width: 100%; padding: 15px; background: transparent; color: ${C.medBrown}; border: 1px solid ${C.blush}; border-radius: 10px; font-size: 14px; cursor: pointer; margin-top: 10px; transition: all .2s; font-family: 'DM Sans', sans-serif; }
         .reset-btn:hover { border-color: ${C.darkBrown}; color: ${C.darkBrown}; }
       `}</style>
@@ -393,6 +588,12 @@ export default function CareerCompanyFinder() {
             </div>
 
             {error && <div className="err">{error}</div>}
+
+            {limitReached && (
+              <div className="limit-banner">
+                <p>You've reached your daily limit — check back tomorrow.</p>
+              </div>
+            )}
 
             {/* Job Title */}
             <div className="card">
@@ -455,11 +656,20 @@ export default function CareerCompanyFinder() {
               </select>
             </div>
 
-            <button className="btn" onClick={handleSearch} disabled={!canSearch()}>
-              {getEffectiveIndustries().length > 1
-                ? `Find companies across ${getEffectiveIndustries().length} industries →`
-                : "Find my 10 companies →"}
-            </button>
+            {!limitReached && (
+              <>
+                <button className="btn" onClick={handleSearch} disabled={!canSearch()}>
+                  {getEffectiveIndustries().length > 1
+                    ? `Find companies across ${getEffectiveIndustries().length} industries →`
+                    : "Find my 10 companies →"}
+                </button>
+                {searches < SEARCH_LIMIT && (
+                  <div className="searches-left">
+                    {searches} search{searches !== 1 ? "es" : ""} remaining today
+                  </div>
+                )}
+              </>
+            )}
           </>
         )}
 
@@ -495,6 +705,19 @@ export default function CareerCompanyFinder() {
                 Level: <strong>{results.level}</strong>&nbsp;&middot;&nbsp;
                 <strong>{totalCompanies}</strong> companies found
               </p>
+            </div>
+
+            {/* Disclaimer */}
+            <div className="disclaimer">
+              <svg className="disclaimer-icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <circle cx="12" cy="12" r="10"/><path d="M12 8v4M12 16h.01"/>
+              </svg>
+              <p>Listings are based on live web searches. Verify each role directly on the careers page as positions may close quickly.</p>
+            </div>
+
+            {/* Action banner */}
+            <div className="action-banner">
+              <p>These companies are actively hiring right now. Each card below tells you exactly what to search for on that company's careers page.</p>
             </div>
 
             {/* Synonym Titles */}
@@ -543,11 +766,35 @@ export default function CareerCompanyFinder() {
                           </svg>
                         </a>
                       )}
+                      {c.searchTitle && (
+                        <div className="search-instruction">
+                          <svg className="si-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                            <circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/>
+                          </svg>
+                          <p>Search &lsquo;<strong>{c.searchTitle}</strong>&rsquo; on this page</p>
+                        </div>
+                      )}
                     </div>
                   ))
                 )}
               </div>
             ))}
+
+            {/* Download buttons */}
+            <div className="download-row">
+              <button className="dl-btn dl-pdf" onClick={() => downloadPDF(results)}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/>
+                </svg>
+                Download PDF
+              </button>
+              <button className="dl-btn dl-csv" onClick={() => downloadCSV(results)}>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M7 10l5 5 5-5M12 15V3"/>
+                </svg>
+                Download CSV
+              </button>
+            </div>
 
             <button className="reset-btn" onClick={reset}>Start a new search</button>
           </>
