@@ -65,6 +65,98 @@ RESPOND ONLY WITH A VALID JSON OBJECT — no preamble, no markdown, no backticks
 }`;
 }
 
+/**
+ * Robustly extract a JSON object from messy LLM text output.
+ * Tries multiple strategies: direct parse, regex extraction, bracket-balanced extraction,
+ * and truncated-JSON repair.
+ */
+function extractJSON(raw) {
+  // Strip markdown code fences and trim
+  const cleaned = raw.replace(/```json\s*/gi, "").replace(/```/g, "").trim();
+
+  // Strategy 1: Direct parse (cleanest case)
+  try {
+    const parsed = JSON.parse(cleaned);
+    if (parsed && typeof parsed === "object") return parsed;
+  } catch (_) {}
+
+  // Strategy 2: Find the outermost { ... } using bracket balancing
+  const start = cleaned.indexOf("{");
+  if (start !== -1) {
+    let depth = 0;
+    let inString = false;
+    let escaped = false;
+    let end = -1;
+
+    for (let i = start; i < cleaned.length; i++) {
+      const ch = cleaned[i];
+      if (escaped) { escaped = false; continue; }
+      if (ch === "\\") { escaped = true; continue; }
+      if (ch === '"') { inString = !inString; continue; }
+      if (inString) continue;
+      if (ch === "{") depth++;
+      if (ch === "}") { depth--; if (depth === 0) { end = i; break; } }
+    }
+
+    if (end !== -1) {
+      try {
+        return JSON.parse(cleaned.slice(start, end + 1));
+      } catch (_) {}
+    }
+
+    // Strategy 3: Greedy regex fallback (handles cases bracket balancing missed)
+    const greedyMatch = cleaned.match(/\{[\s\S]*\}/);
+    if (greedyMatch) {
+      try {
+        return JSON.parse(greedyMatch[0]);
+      } catch (_) {}
+    }
+
+    // Strategy 4: Truncated JSON repair — close open brackets/braces
+    const fragment = cleaned.slice(start);
+    const repaired = repairTruncatedJSON(fragment);
+    if (repaired) {
+      try {
+        return JSON.parse(repaired);
+      } catch (_) {}
+    }
+  }
+
+  return null;
+}
+
+/** Attempt to close unclosed brackets/braces in truncated JSON */
+function repairTruncatedJSON(str) {
+  // Remove any trailing incomplete string value (unmatched quote)
+  let s = str.replace(/,\s*"[^"]*$/, "").replace(/,\s*$/, "");
+
+  let inString = false;
+  let escaped = false;
+  const stack = [];
+
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (escaped) { escaped = false; continue; }
+    if (ch === "\\") { escaped = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (ch === "{" || ch === "[") stack.push(ch);
+    if (ch === "}") { if (stack.length && stack[stack.length - 1] === "{") stack.pop(); }
+    if (ch === "]") { if (stack.length && stack[stack.length - 1] === "[") stack.pop(); }
+  }
+
+  // If still inside a string, close it
+  if (inString) s += '"';
+
+  // Close all remaining open brackets/braces in reverse order
+  while (stack.length) {
+    const open = stack.pop();
+    s += open === "{" ? "}" : "]";
+  }
+
+  return s;
+}
+
 export default function CareerCompanyFinder() {
   const [jobTitle,    setJobTitle]    = useState("");
   const [industries,  setIndustries]  = useState([{ value: "", other: "" }]);
@@ -161,14 +253,13 @@ export default function CareerCompanyFinder() {
         }
 
         const textBlocks = data.content?.filter((b) => b.type === "text") || [];
-        const lastText = textBlocks[textBlocks.length - 1]?.text;
-        if (!lastText) throw new Error("No response received.");
+        // Combine ALL text blocks — sometimes JSON is split across multiple blocks
+        const allText = textBlocks.map((b) => b.text).join("\n");
+        if (!allText.trim()) throw new Error("No response received.");
 
-        const cleaned = lastText.replace(/```json|```/g, "").trim();
-        const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
-        if (!jsonMatch) throw new Error("Could not find JSON in response.");
+        const parsed = extractJSON(allText);
+        if (!parsed) throw new Error("Could not parse company results from response.");
 
-        const parsed = JSON.parse(jsonMatch[0]);
         if (parsed.synonymTitles) {
           parsed.synonymTitles.forEach((t) => allSynonyms.add(t));
         }
