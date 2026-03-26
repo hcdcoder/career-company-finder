@@ -585,6 +585,7 @@ export default function CareerCompanyFinder() {
             <div className="intro">
               <h2>Find companies actively hiring for roles that fit you.</h2>
               <p>Enter your target job title, choose up to 3 industries, and this tool will search company career pages — not job boards — to find organizations with active openings that match your background.</p>
+              <p style={{ fontSize: 12, color: C.blush, marginTop: 12, fontWeight: 400 }}>Please note: this tool is limited to 3 searches per 24 hours.</p>
             </div>
 
             {error && <div className="err">{error}</div>}
